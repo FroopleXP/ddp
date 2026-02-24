@@ -4,6 +4,11 @@ import (
 	"log"
 	"net"
 	"io"
+	"errors"
+)
+
+var (
+	ErrPacketLen error = errors.New("invalid packet length")
 )
 
 type ICMPType byte
@@ -26,46 +31,50 @@ func (t ICMPType) String() string {
 type ICMPPacket struct {
 	Type ICMPType
 	Code byte
+	Checksum uint16
 	Identifier uint16
 	Sequence uint16
 	Payload []byte
 }
 
-func (p *ICMPPacket) checksum(sum uint16) uint16 {
-	var data = []byte{
+func (p *ICMPPacket) Bytes() []byte {
+	b := []byte{
 		byte(p.Type),
-		p.Code, 
-		byte(sum >> 8), byte(sum),
+		byte(p.Code),
+		byte(p.Checksum >> 8), byte(p.Checksum),
 		byte(p.Identifier >> 8), byte(p.Identifier),
 		byte(p.Sequence >> 8), byte(p.Sequence),
 	}
-	data = append(data, p.Payload...)	
-	return checksum(data)
+
+	return append(b, p.Payload...)
 }
 
-func (p *ICMPPacket) Valid(checksum uint16) bool {
-	return p.checksum(checksum) == 0x00
+func (p *ICMPPacket) Valid() bool {
+	if p.Checksum == 0x00 {
+		p.Checksum = checksum(p.Bytes())
+	}
+	return checksum(p.Bytes()) == 0x00
 }
 
-func (p *ICMPPacket) Write(w io.Writer) error {
-	c := p.checksum(0x00)
-	ch, cl := byte(c >> 8), byte(c)
-	ih, il := byte(p.Identifier >> 8), byte(p.Identifier)
-	sh, sl := byte(p.Sequence >> 8), byte(p.Sequence)
+func (p *ICMPPacket) Write(w io.Writer) (int, error) {
+	if p.Checksum == 0x00 {
+		p.Checksum = checksum(p.Bytes())
+	}
+	return w.Write(p.Bytes())
+}
 
-	payload := []byte{
-		byte(p.Type),
-		byte(p.Code),
-		ch, cl, 	
-		ih, il,
-		sh, sl,
+func (p *ICMPPacket) From(b []byte) error {
+	if len(b) < 8 {
+		return ErrPacketLen
 	}
 
-	payload = append(payload, p.Payload...)
-
-	if _, err := w.Write(payload); err != nil {
-		return err
-	}
+	p.Type = ICMPType(b[0])
+	p.Code = b[1]
+	p.Identifier = uint16(b[4]) << 8 | uint16(b[5])
+	p.Sequence = uint16(b[6]) << 8 | uint16(b[7])
+	p.Payload = b[8:]
+	
+	p.Checksum = uint16(b[2]) << 8 | uint16(b[3])
 
 	return nil
 }
@@ -97,23 +106,13 @@ func listener(network string) {
 			continue
 		}
 
-		if n < 8 {
-			log.Printf("invalid packet, len too short")
+		var pkt ICMPPacket		
+		if err := pkt.From(b[:n]); err != nil {
+			log.Printf("failed to read packet: %v", err)
 			continue
 		}
 
-		log.Printf("rx'd packet (%d) from %s", n, addr)
-
-		var pkt ICMPPacket		
-		pkt.Type = ICMPType(b[0])
-		pkt.Code = b[1]
-		pkt.Identifier = uint16(b[4]) << 8 | uint16(b[5])
-		pkt.Sequence = uint16(b[6]) << 8 | uint16(b[7])
-		pkt.Payload = b[8:n]
-		
-		checksum := uint16(b[2]) << 8 | uint16(b[3])
-
-		log.Printf("rx'd packet type=%s, code=%d, checksum=%04x, valid=%t", pkt.Type, pkt.Code, checksum, pkt.Valid(checksum))
+		log.Printf("rx'd packet addr=%s, type=%s, code=%d, checksum=%04x, valid=%t", addr, pkt.Type, pkt.Code, checksum, pkt.Valid())
 	}
 }
 
@@ -132,7 +131,7 @@ func main() {
 	pkt.Sequence = 0x0020
 	pkt.Payload = []byte("I'm pinging you!\n")
 
-	if err := pkt.Write(conn); err != nil {
+	if _, err := pkt.Write(conn); err != nil {
 		log.Fatalf("failed to write packet: %v", err)
 	}
 

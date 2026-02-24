@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"strings"
+	"strconv"
 )
 
 const (
@@ -14,6 +16,31 @@ func (ip IPAddress) String() string {
 	a, b, c, d :=
 		uint8(ip>>24), uint8(ip>>16), uint8(ip>>8), uint8(ip)
 	return fmt.Sprintf("%d.%d.%d.%d", a, b, c, d)
+}
+
+const NilIP = IPAddress(0)		
+
+func ParseIP(value string) IPAddress {
+	parts := strings.Split(value, ".")	
+	if len(parts) < 4 {
+		return NilIP
+	}
+
+	var err error
+	var a, b, c, d int
+
+	a, err = strconv.Atoi(parts[0])
+	b, err = strconv.Atoi(parts[1])
+	c, err = strconv.Atoi(parts[2])
+	d, err = strconv.Atoi(parts[3])
+
+	if err != nil {
+		return NilIP
+	}
+
+	ip := uint32(a) << 24 | uint32(b) << 16 | uint32(c) << 8 | uint32(d)
+
+	return IPAddress(ip)
 }
 
 type IPProtocol byte

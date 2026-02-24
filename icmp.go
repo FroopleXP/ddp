@@ -50,17 +50,24 @@ func (p *ICMPPacket) Bytes() []byte {
 	return append(b, p.Payload...)
 }
 
-func (p *ICMPPacket) Valid() bool {
+// calculate the checksum
+func (p *ICMPPacket) calculate() {
+	// if we see 0x00 it means this is likely a new packet
 	if p.Checksum == 0x00 {
 		p.Checksum = checksum(p.Bytes())
+		return
 	}
+	p.Checksum = 0x00
+	p.Checksum = checksum(p.Bytes())
+}
+
+func (p *ICMPPacket) Valid() bool {
+	p.calculate()
 	return checksum(p.Bytes()) == 0x00
 }
 
 func (p *ICMPPacket) Write(w io.Writer) (int, error) {
-	if p.Checksum == 0x00 {
-		p.Checksum = checksum(p.Bytes())
-	}
+	p.calculate()
 	return w.Write(p.Bytes())
 }
 

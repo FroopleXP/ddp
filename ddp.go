@@ -3,87 +3,251 @@ package main
 import (
 	"log"
 	"net"
+	"bytes"
+	"os"
+	"fmt"
 	"time"
+	"errors"
+	"sync"
+	"context"
 )
 
-func listener(network string) {
-	conn, err := net.ListenPacket("ip4:1", network)
+var (
+	DuckIP = ParseIP("4.21.3.11")
+	DuckMagicIdentifier = uint16(0xC4AC)
+)
+
+const (
+	PingDelay = time.Second * 5
+	ListenDeadline = time.Second * 15
+)
+
+var MagicPacket = ICMPPacket{
+	Type: ICMPTypeEchoRequest,
+	Code: 0x00,
+	Identifier: DuckMagicIdentifier,
+	Sequence: uint16(0),
+	Payload: []byte("quack"),
+}
+
+type DDP struct {
+	Interface IPAddress
+	Target IPAddress
+
+	wg sync.WaitGroup
+}
+
+func (d *DDP) Start(ctx context.Context) error {
+	if err := d.pinger(ctx); err != nil {
+		return err
+	}
+
+	if err := d.listener(ctx); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (d *DDP) Wait() {
+	d.wg.Wait()
+}
+
+// pinger periodically pings into the ether to a unrouteable
+// ip address.
+func (d *DDP) pinger(ctx context.Context) error {
+	conn, err := net.Dial("ip4:1", DuckIP.String())
+	if err != nil {
+		return err
+	}
+
+	d.wg.Add(1)
+	go func() {
+		defer func () {
+			conn.Close()
+			d.wg.Done()
+		}()
+
+		ticker := time.NewTicker(PingDelay)
+		defer ticker.Stop()
+
+		log.Printf("pinger started interval=%s", PingDelay)
+
+		for {
+			select {
+			case <-ctx.Done():
+				log.Printf("pinger closed, reason: %s", context.Cause(ctx))
+				return
+			case <-ticker.C:
+				n, err := MagicPacket.Write(conn) 
+				if err != nil {
+					log.Printf("failed to write magic packet: %v", err)
+					continue
+				}
+				log.Printf("magic packet sent size=%d byte(s), seq=%d", n, seq)
+			}
+		}
+	}()
+
+	return nil
+}
+
+func (d *DDP) listener(ctx context.Context) error {
+	if d.Interface == NilIP {
+		return fmt.Errorf("invalid or missing interface address")
+	}
+
+	conn, err := net.ListenPacket("ip4:1", d.Interface.String())
 	if err != nil {
 		log.Fatalf("failed to start listener: %v", err)
 	}
-	defer conn.Close()
 
-	b := make([]byte, 2048)
+	d.wg.Add(1)
+	go func() {
+		defer func () {
+			conn.Close()
+			d.wg.Done()
+		}()
 
-	for {
-		n, addr, err := conn.ReadFrom(b)
-		if err != nil {
-			log.Printf("failed to read packet: %v", err)
-			continue
-		}
+		var buf []byte = make([]byte, 2048)
+		var packet ICMPPacket
 
-		var pkt ICMPPacket
+		log.Printf("listener started")
 
-		if err := pkt.From(b[:n]); err != nil || !pkt.Valid() {
-			log.Printf("received invalid packet")
-			continue
-		}
+		for {
+			select {
+			case <-ctx.Done():
+				log.Printf("listener closed, reason: %s", context.Cause(ctx))
+				return
+			default:
+				if err := conn.SetDeadline(time.Now().Add(ListenDeadline)); err != nil {
+					log.Printf("failed to extend connection deadline: %v", err)
+					return
+				}
 
-		if pkt.Type == ICMPTypeEchoReply {
-			log.Printf("rx'd echo reply addr=%s, type=%d, code=%d", addr, pkt.Type, pkt.Code)
-			continue
-		}
+				n, addr, err := conn.ReadFrom(buf)
+				if err != nil {
+					if errors.Is(err, os.ErrDeadlineExceeded) {
+						continue
+					}
+					log.Printf("read error: %v", err)
+					return
+				}
 
-		if pkt.Type == ICMPTypeDestinationUnreachable {
-			var ipPkt IPPacket
-			if err := ipPkt.From(pkt.Payload); err != nil {
-				log.Printf("failed to read ip packet: %v", err)
-				continue
-			}
-
-			if ipPkt.Protocol != IPProtocolICMP {
-				continue
-			}
-
-			log.Printf("ip packet ver=%d, ihl=%d, src=%s, dst=%s", ipPkt.Version, ipPkt.IHL, ipPkt.SourceAddr, ipPkt.DestinationAddr)
-
-			{
-				var pkt ICMPPacket
-				if err := pkt.From(ipPkt.Payload); err != nil {
-					log.Printf("failed to read icmp packet from ip packet: %v", err)
+				if err := packet.From(buf[:n]); err != nil {
+					log.Printf("packet parse error: %v", err)
 					continue
 				}
 
-				log.Printf("icmp in ip addr=%s, type=%d, code=%d, valid=%t", addr, pkt.Type, pkt.Code, pkt.Valid())
+				if !packet.Valid() || packet.Type != ICMPTypeDestinationUnreachable {
+					log.Printf("received invalid icmp packet, skipping")
+					continue
+				}
+
+				payload := packet.Payload
+		
+				// destination unreacable packets include the original ip packet
+				// we can use this the get the remote ip of the caller.
+				{
+					var packet IPPacket
+					if err := packet.From(payload); err != nil {
+						log.Printf("ip packet read error: %v", err)
+						continue
+					}
+
+					if packet.Protocol != IPProtocolICMP {
+						continue
+					}
+
+					if packet.DestinationAddr != DuckIP {
+						log.Printf("ip packet not destined for peer")
+						continue
+					}
+
+					payload = packet.Payload
+				}
+
+				// reconstruct the contained icmp packet and see if it was sent
+				// by a peer.
+				{
+					var packet ICMPPacket
+					if err := packet.From(payload); err != nil {
+						log.Printf("error parsing containing icmp packet: %v", err)
+						continue
+					}
+
+					if packet.Identifier != DuckMagicIdentifier {
+						log.Printf("icmp packet not sent by peer")
+						continue
+					}
+				}
+
+				log.Printf("peer found ip=%s", addr)
 			}
 		}
-	}
+	}()
+
+	return nil
 }
 
-func main() {
-	go listener("10.20.0.248")
+func (d *DDP) quacker(ctx context.Context) error {
+	if d.Target == NilIP {
+		return fmt.Errorf("target ip is not defined")
+	}
 
-	conn, err := net.Dial("ip4:1", "86.14.108.21")
+	conn, err := net.Dial("ip4:1", d.Target.String())
 	if err != nil {
-		log.Fatalf("failed to connect: %v", err)
+		return err
 	}
-	defer conn.Close()
 
-	for i := range 10 {
-		var pkt ICMPPacket
-		pkt.Type = ICMPTypeEchoRequest
-		pkt.Code = 0x00
-		pkt.Identifier = 0x5e1d
-		pkt.Sequence = uint16(i)
-		pkt.Payload = []byte("I'm pinging you!\n")
-
-		if _, err := pkt.Write(conn); err != nil {
-			log.Fatalf("failed to write packet: %v", err)
-			break
+	var payload bytes.Buffer
+	
+	// build the inner ip packet
+	{
+		var packet = IPPacket{
+			Version: byte(4),
+			IHL: ,
 		}
-
-		time.Sleep(1 * time.Second)
 	}
 
-	<-make(chan interface{}, 0)
+	var packet = ICMPPacket{
+		Type: ICMPTypeEchoRequest,
+		Code: 0x00,
+		Identifier: 0x4a4a,
+		Sequence: uint16(0),
+		Payload: 
+	}
+
+	d.wg.Add(1)
+	go func() {
+		defer func () {
+			conn.Close()
+			d.wg.Done()
+		}()
+
+		ticker := time.NewTicker(PingDelay)
+		defer ticker.Stop()
+
+		log.Printf("quacker started interval=%s", PingDelay)
+
+		for {
+			select {
+			case <-ctx.Done():
+				log.Printf("quacker closed, reason: %s", context.Cause(ctx))
+				return
+			case <-ticker.C:
+					
+
+				n, err := magic.Write(conn) 
+				if err != nil {
+					log.Printf("failed to write magic packet: %v", err)
+					continue
+				}
+				log.Printf("magic packet sent size=%d byte(s), seq=%d", n, seq)
+				seq++
+			}
+		}
+	}()
+
+	return nil
 }

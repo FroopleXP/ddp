@@ -18,5 +18,5 @@ func TestChecksum(t *testing.T) {
 	var expect uint16 = 0x3b8a
 	if checksum != expect {
 		t.Errorf("expected '%04x', got %04x", expect, checksum)
-	}		
+	}
 }

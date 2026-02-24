@@ -13,6 +13,16 @@ const (
 	ICMPTypeEchoReply = ICMPType(0x00)
 )
 
+func (t ICMPType) String() string {
+	switch t {
+	case ICMPTypeEchoRequest:
+		return "echo request"
+	case ICMPTypeEchoReply:
+		return "echo reply"
+	}
+	return "unknown"
+}
+
 type ICMPPacket struct {
 	Type ICMPType
 	Code byte
@@ -21,10 +31,11 @@ type ICMPPacket struct {
 	Payload []byte
 }
 
-func (p *ICMPPacket) Checksum() uint16 {
+func (p *ICMPPacket) checksum(sum uint16) uint16 {
 	var data = []byte{
 		byte(p.Type),
 		p.Code, 
+		byte(sum >> 8), byte(sum),
 		byte(p.Identifier >> 8), byte(p.Identifier),
 		byte(p.Sequence >> 8), byte(p.Sequence),
 	}
@@ -32,8 +43,12 @@ func (p *ICMPPacket) Checksum() uint16 {
 	return checksum(data)
 }
 
+func (p *ICMPPacket) Valid(checksum uint16) bool {
+	return p.checksum(checksum) == 0x00
+}
+
 func (p *ICMPPacket) Write(w io.Writer) error {
-	c := p.Checksum()
+	c := p.checksum(0x00)
 	ch, cl := byte(c >> 8), byte(c)
 	ih, il := byte(p.Identifier >> 8), byte(p.Identifier)
 	sh, sl := byte(p.Sequence >> 8), byte(p.Sequence)
@@ -73,24 +88,37 @@ func listener(network string) {
 	}
 	defer conn.Close()
 
-	buf := make([]byte, 4096)
+	b := make([]byte, 2048)
 
 	for {
-		n, _, err := conn.ReadFrom(buf)
-		if n > 0 {
-			log.Printf("data=%s", string(buf[:n]))
-		}
+		n, addr, err := conn.ReadFrom(b)
 		if err != nil {
-			if err == io.EOF {
-				break
-			}
-			log.Fatalf("error in rx: %v", err)
+			log.Printf("failed to read packet: %v", err)
+			continue
 		}
+
+		if n < 8 {
+			log.Printf("invalid packet, len too short")
+			continue
+		}
+
+		log.Printf("rx'd packet (%d) from %s", n, addr)
+
+		var pkt ICMPPacket		
+		pkt.Type = ICMPType(b[0])
+		pkt.Code = b[1]
+		pkt.Identifier = uint16(b[4]) << 8 | uint16(b[5])
+		pkt.Sequence = uint16(b[6]) << 8 | uint16(b[7])
+		pkt.Payload = b[8:n]
+		
+		checksum := uint16(b[2]) << 8 | uint16(b[3])
+
+		log.Printf("rx'd packet type=%s, code=%d, checksum=%04x, valid=%t", pkt.Type, pkt.Code, checksum, pkt.Valid(checksum))
 	}
 }
 
 func main() {
-	go listener("10.20.0.203")
+	go listener("10.20.0.248")
 
 	conn, err := net.Dial("ip4:1", "86.14.108.21")
 	if err != nil {
@@ -104,8 +132,6 @@ func main() {
 	pkt.Sequence = 0x0020
 	pkt.Payload = []byte("I'm pinging you!\n")
 
-	log.Printf("body=%s", pkt.Payload)
-
 	if err := pkt.Write(conn); err != nil {
 		log.Fatalf("failed to write packet: %v", err)
 	}
@@ -113,8 +139,6 @@ func main() {
 	if err := conn.Close(); err != nil {
 		log.Fatalf("failed to close connection: %v", err)
 	}
-
-	log.Printf("checksum=%04x", pkt.Checksum())
 
 	<-make(chan interface{}, 0)
 }

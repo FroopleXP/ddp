@@ -1,4 +1,4 @@
-.all: pinger
+.all: ddp
 
-pinger:
-	go build -o ./bin/pinger .
+ddp:
+	go build -o ./bin/ddp .

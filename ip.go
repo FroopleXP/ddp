@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"strings"
+	"io"
 	"strconv"
 )
 
@@ -93,3 +94,45 @@ func (p *IPPacket) From(b []byte) error {
 
 	return nil
 }
+
+func (p *IPPacket) HeaderBytes() []byte {
+	return []byte {
+		p.Version << 4 | p.IHL,
+		p.DSCP    << 2 | p.ECN,
+		byte(p.TotalLength >> 8),    byte(p.TotalLength),
+		byte(p.Identification >> 8), byte(p.Identification),
+		p.Flags   << 5 | byte(p.FragmentOffset >> 8), byte(p.FragmentOffset),
+		p.TTL,
+		byte(p.Protocol),
+		byte(p.HeaderChecksum >> 8), byte(p.HeaderChecksum),
+		byte(p.SourceAddr >> 24), byte(p.SourceAddr >> 16), byte(p.SourceAddr >> 8), byte(p.SourceAddr),
+		byte(p.DestinationAddr >> 24), byte(p.DestinationAddr >> 16), byte(p.DestinationAddr >> 8), byte(p.DestinationAddr),
+	}
+}
+
+func (p *IPPacket) Bytes() []byte {
+	return append(p.HeaderBytes(), p.Payload...)
+}
+
+// calculate the checksum
+func (p *IPPacket) calculate() {
+	// if we see 0x00 it means this is likely a new packet
+	if p.HeaderChecksum == 0x00 {
+		p.HeaderChecksum = checksum(p.HeaderBytes())
+		return
+	}
+	p.HeaderChecksum = 0x00
+	p.HeaderChecksum = checksum(p.HeaderBytes())
+}
+
+func (p *IPPacket) Valid() bool {
+	p.calculate()
+	return checksum(p.HeaderBytes()) == 0x00
+}
+
+func (p *IPPacket) Write(w io.Writer) (int, error) {
+	p.calculate()
+	return w.Write(p.Bytes())
+}
+
+

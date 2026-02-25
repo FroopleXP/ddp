@@ -46,6 +46,10 @@ func (d *DDP) Start(ctx context.Context) error {
 		return err
 	}
 
+	if err := d.quacker(ctx); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -84,7 +88,7 @@ func (d *DDP) pinger(ctx context.Context) error {
 					log.Printf("failed to write magic packet: %v", err)
 					continue
 				}
-				log.Printf("magic packet sent size=%d byte(s), seq=%d", n, seq)
+				log.Printf("magic packet sent size=%d byte(s)", n)
 			}
 		}
 	}()
@@ -128,7 +132,7 @@ func (d *DDP) listener(ctx context.Context) error {
 				n, addr, err := conn.ReadFrom(buf)
 				if err != nil {
 					if errors.Is(err, os.ErrDeadlineExceeded) {
-						continue
+						continue // yield so the context can close
 					}
 					log.Printf("read error: %v", err)
 					return
@@ -161,6 +165,11 @@ func (d *DDP) listener(ctx context.Context) error {
 
 					if packet.DestinationAddr != DuckIP {
 						log.Printf("ip packet not destined for peer")
+						continue
+					}
+
+					if packet.SourceAddr == d.Interface {
+						//log.Printf("received icmp packet from ourselves, ignoring")
 						continue
 					}
 
@@ -200,23 +209,68 @@ func (d *DDP) quacker(ctx context.Context) error {
 		return err
 	}
 
-	var payload bytes.Buffer
+	var payload = bytes.NewBuffer(make([]byte, 0))
+
+	// write the inner icmp magic packet
+	{
+		n, err := MagicPacket.Write(payload)
+		if err != nil {
+			return err
+		}
+		
+		log.Printf("written %d byte(s) to icmp-ip-icmp packet", n)
+	}
 	
 	// build the inner ip packet
 	{
 		var packet = IPPacket{
 			Version: byte(4),
-			IHL: ,
+			IHL: byte(5),
+			DSCP: byte(0),
+			ECN: byte(0),
+			TotalLength: uint16(84),
+			Identification: uint16(23810),
+			Flags: byte(2),
+			FragmentOffset: uint16(0),
+			TTL: byte(63),
+			Protocol: IPProtocolICMP,
+			HeaderChecksum: uint16(0),
+			SourceAddr: d.Interface,
+			DestinationAddr: d.Target,
+			Payload: payload.Bytes(),
 		}
+
+		payload.Reset()
+
+		n, err := packet.Write(payload)
+		if err != nil {
+			return err
+		}
+
+		log.Printf("written %d byte(s) to icmp-ip packet", n)
 	}
 
-	var packet = ICMPPacket{
-		Type: ICMPTypeEchoRequest,
-		Code: 0x00,
-		Identifier: 0x4a4a,
-		Sequence: uint16(0),
-		Payload: 
+	// write the outer icmp packet
+	{
+		var packet = ICMPPacket{
+			Type: ICMPTypeDestinationUnreachable,
+			Code: 0x00,
+			Identifier: 0x4a4a,
+			Sequence: uint16(0),
+			Payload: payload.Bytes(),
+		}
+
+		payload.Reset()
+
+		n, err := packet.Write(payload)
+		if err != nil {
+			return err
+		}
+
+		log.Printf("written %d byte(s) to icmp packet", n)
 	}
+
+	log.Printf("final payload size=%d byte(s)", payload.Len())
 
 	d.wg.Add(1)
 	go func() {
@@ -236,15 +290,12 @@ func (d *DDP) quacker(ctx context.Context) error {
 				log.Printf("quacker closed, reason: %s", context.Cause(ctx))
 				return
 			case <-ticker.C:
-					
-
-				n, err := magic.Write(conn) 
+				n, err := payload.WriteTo(conn) 
 				if err != nil {
-					log.Printf("failed to write magic packet: %v", err)
+					log.Printf("failed to write icmp-ip-icmp packet: %v", err)
 					continue
 				}
-				log.Printf("magic packet sent size=%d byte(s), seq=%d", n, seq)
-				seq++
+				log.Printf("icmp-ip-icmp packet sent size=%d byte(s)", n)
 			}
 		}
 	}()

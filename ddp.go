@@ -261,6 +261,11 @@ func (d *DDP) quacker(ctx context.Context) error {
 		}
 	}
 
+	packet := make([]byte, payload.Len())
+	if _, err := payload.Read(packet); err != nil {
+		return err
+	}
+
 	d.wg.Add(1)
 	go func() {
 		defer func () {
@@ -279,7 +284,7 @@ func (d *DDP) quacker(ctx context.Context) error {
 				log.Printf("quacker closed, reason: %s", context.Cause(ctx))
 				return
 			case <-ticker.C:
-				n, err := payload.WriteTo(conn) 
+				n, err := payload.Write(packet) 
 				if err != nil {
 					log.Printf("failed to write icmp-ip-icmp packet: %v", err)
 					continue

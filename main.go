@@ -33,7 +33,7 @@ func main() {
 	defer cancel()
 
 	context.AfterFunc(ctx, func() {
-		log.Printf("shutting down, please wait for services to close gracefully...")
+		log.Printf("shutting down, max wait time %s", ListenDeadline)
 	})
 
 	DuckIP = ParseIP(*fDuckIP)
@@ -43,7 +43,7 @@ func main() {
 		log.Fatalf("failed to start ddp: %v", err)
 	}
 
-	log.Printf("ddp started")
+	log.Printf("ddp started - ctrl+c to quit")
 
 	ddp.Wait()
 }

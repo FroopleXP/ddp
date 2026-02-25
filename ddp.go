@@ -5,7 +5,6 @@ import (
 	"net"
 	"bytes"
 	"os"
-	"fmt"
 	"time"
 	"errors"
 	"sync"
@@ -38,30 +37,17 @@ type DDP struct {
 	wg sync.WaitGroup
 }
 
-func (d *DDP) Start(ctx context.Context) error {
-	log.Printf("ddp is starting duck-ip=%s, target=%s, interface=%s", DuckIP, d.Target, d.Interface)
-	if err := d.pinger(ctx); err != nil {
-		return err
-	}
-
-	if err := d.listener(ctx); err != nil {
-		return err
-	}
-
-	if err := d.quacker(ctx); err != nil {
-		return err
-	}
-
-	return nil
-}
-
 func (d *DDP) Wait() {
 	d.wg.Wait()
 }
 
+func (d *DDP) Ping(conn net.Conn) (int, error) {
+	return MagicPacket.Write(conn) 
+}
+
 // pinger periodically pings into the ether to a unrouteable
 // ip address.
-func (d *DDP) pinger(ctx context.Context) error {
+func (d *DDP) StartPinger(ctx context.Context) error {
 	conn, err := net.Dial("ip4:1", DuckIP.String())
 	if err != nil {
 		return err
@@ -77,15 +63,12 @@ func (d *DDP) pinger(ctx context.Context) error {
 		ticker := time.NewTicker(PingDelay)
 		defer ticker.Stop()
 
-		log.Printf("pinger started interval=%s", PingDelay)
-
 		for {
 			select {
 			case <-ctx.Done():
-				log.Printf("pinger closed, reason: %s", context.Cause(ctx))
 				return
 			case <-ticker.C:
-				n, err := MagicPacket.Write(conn) 
+				n, err := d.Ping(conn)
 				if err != nil {
 					log.Printf("failed to write magic packet: %v", err)
 					continue
@@ -98,14 +81,10 @@ func (d *DDP) pinger(ctx context.Context) error {
 	return nil
 }
 
-func (d *DDP) listener(ctx context.Context) error {
-	if d.Interface == NilIP {
-		return fmt.Errorf("invalid or missing interface address")
-	}
-
-	conn, err := net.ListenPacket("ip4:1", d.Interface.String())
+func (d *DDP) StartListener(ctx context.Context, intface IPAddress) error {
+	conn, err := net.ListenPacket("ip4:1", intface.String())
 	if err != nil {
-		log.Fatalf("failed to start listener: %v", err)
+		return err
 	}
 
 	d.wg.Add(1)
@@ -118,12 +97,9 @@ func (d *DDP) listener(ctx context.Context) error {
 		var buf []byte = make([]byte, 2048)
 		var packet ICMPPacket
 
-		log.Printf("listener started")
-
 		for {
 			select {
 			case <-ctx.Done():
-				log.Printf("listener closed, reason: %s", context.Cause(ctx))
 				return
 			default:
 				if err := conn.SetDeadline(time.Now().Add(ListenDeadline)); err != nil {
@@ -201,33 +177,26 @@ func (d *DDP) listener(ctx context.Context) error {
 	return nil
 }
 
-func (d *DDP) quacker(ctx context.Context) error {
-	if d.Target == NilIP {
-		return fmt.Errorf("target ip is not defined")
-	}
-
-	conn, err := net.Dial("ip4:1", d.Target.String())
-	if err != nil {
-		return err
-	}
-
+// Quack sends the destination unreachable packet to the
+// connection.
+func (d *DDP) Quack(conn net.Conn) (int, error) {
 	var payload = bytes.NewBuffer(make([]byte, 0))
 
 	// write the inner icmp magic packet
 	{
 		if _, err := MagicPacket.Write(payload); err != nil {
-			return err
+			return 0, err
 		}
 	}
 	
-	// build the inner ip packet
+	// write the inner ip packet
 	{
 		var packet = IPPacket{
 			Version: byte(4),
 			IHL: byte(5),
 			DSCP: byte(0),
 			ECN: byte(0),
-			TotalLength: uint16(84),
+			TotalLength: uint16(payload.Len() + 20),
 			Identification: uint16(23810),
 			Flags: byte(2),
 			FragmentOffset: uint16(0),
@@ -241,28 +210,26 @@ func (d *DDP) quacker(ctx context.Context) error {
 
 		payload.Reset()
 		if _, err := packet.Write(payload); err != nil {
-			return err
+			return 0, err
 		}
 	}
 
-	// write the outer icmp packet
-	{
-		var packet = ICMPPacket{
-			Type: ICMPTypeDestinationUnreachable,
-			Code: 0x00,
-			Identifier: 0x4a4a,
-			Sequence: uint16(0),
-			Payload: payload.Bytes(),
-		}
-
-		payload.Reset()
-		if _, err := packet.Write(payload); err != nil {
-			return err
-		}
+	// write the final, outer icmp packet
+	var packet = ICMPPacket{
+		Type: ICMPTypeDestinationUnreachable,
+		Code: byte(0x01),
+		Identifier: 0x4a4a,
+		Sequence: uint16(0),
+		Payload: payload.Bytes(),
 	}
 
-	packet := make([]byte, payload.Len())
-	if _, err := payload.Read(packet); err != nil {
+	return packet.Write(conn)
+}
+
+// StartQuacker perdiodically quacks at the target
+func (d *DDP) StartQuacker(ctx context.Context, target IPAddress) error {
+	conn, err := net.Dial("ip4:1", target.String())
+	if err != nil {
 		return err
 	}
 
@@ -276,20 +243,15 @@ func (d *DDP) quacker(ctx context.Context) error {
 		ticker := time.NewTicker(PingDelay)
 		defer ticker.Stop()
 
-		log.Printf("quacker started interval=%s", PingDelay)
-
 		for {
 			select {
 			case <-ctx.Done():
-				log.Printf("quacker closed, reason: %s", context.Cause(ctx))
 				return
 			case <-ticker.C:
-				n, err := payload.Write(packet) 
-				if err != nil {
-					log.Printf("failed to write icmp-ip-icmp packet: %v", err)
+				if _, err := d.Quack(conn); err != nil {
+					log.Printf("quack failed: %v", err)
 					continue
 				}
-				log.Printf("icmp-ip-icmp packet sent size=%d byte(s)", n)
 			}
 		}
 	}()

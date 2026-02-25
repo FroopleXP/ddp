@@ -3,6 +3,8 @@ package main
 import (
 	"log"
 	"os"
+	"net"
+	"time"
 	"os/signal"
 	"context"
 	"flag"
@@ -26,8 +28,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	interfaceIp := flag.Arg(0)
-	targetIp := flag.Arg(1)
+	intface := ParseIP(flag.Arg(0))
+	target := ParseIP(flag.Arg(1))
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
@@ -38,10 +40,41 @@ func main() {
 
 	DuckIP = ParseIP(*fDuckIP)
 
-	var ddp = DDP{ Interface: ParseIP(interfaceIp), Target: ParseIP(targetIp) }
-	if err := ddp.Start(ctx); err != nil {
-		log.Fatalf("failed to start ddp: %v", err)
+	var ddp DDP
+
+	log.Print("starting listener")
+	if err := ddp.StartListener(ctx, intface); err != nil {
+		log.Fatalf("failed to start listener: %v", err)
 	}
+
+	log.Printf("dialing duck=%s", DuckIP.String())
+	duckConn, err := net.Dial("ip4:1", DuckIP.String())
+	if err != nil {
+		log.Fatalf("failed to dial duck: %v", err)
+	}
+
+	log.Print("sending ping to duck=%s", DuckIP.String())
+	n, err := ddp.Ping(duckConn)
+	if err != nil {
+		log.Printf("ping failed: %v", err)
+	}
+	log.Printf("-- sent %d byte(s) to duck", n)
+
+	log.Printf("brief pause %s", PingDelay)
+	time.Sleep(PingDelay)
+
+	log.Printf("dialing target=%s", target.String())
+	targetConn, err := net.Dial("ip4:1", target.String())
+	if err != nil {
+		log.Fatalf("failed to dial target: %v", err)
+	}
+
+	log.Printf("sending quack to target=%s", target.String())
+	n, err = ddp.Quack(targetConn)
+	if err != nil {
+		log.Printf("quack failed: %v", err)
+	}
+	log.Printf("-- sent %d byte(s) to target", n)
 
 	log.Printf("ddp started - ctrl+c to quit")
 

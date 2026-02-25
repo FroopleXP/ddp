@@ -15,6 +15,7 @@ const (
 	ICMPTypeEchoRequest            = ICMPType(0x08)
 	ICMPTypeEchoReply              = ICMPType(0x00)
 	ICMPTypeDestinationUnreachable = ICMPType(0x03)
+	ICMPTypeTimeExceeded           = ICMPType(0x0B)
 )
 
 func (t ICMPType) String() string {
@@ -25,6 +26,8 @@ func (t ICMPType) String() string {
 		return "echo reply"
 	case ICMPTypeDestinationUnreachable:
 		return "destination unreachable"
+	case ICMPTypeTimeExceeded:
+		return "time exceeded"
 	}
 	return "unknown"
 }

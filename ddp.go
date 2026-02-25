@@ -121,7 +121,7 @@ func (d *DDP) StartListener(ctx context.Context, intface IPAddress) error {
 					continue
 				}
 
-				if !packet.Valid() || packet.Type != ICMPTypeDestinationUnreachable {
+				if !packet.Valid() || packet.Type != ICMPTypeTimeExceeded {
 					log.Printf("received invalid icmp packet, skipping")
 					continue
 				}
@@ -216,7 +216,7 @@ func (d *DDP) Quack(conn net.Conn) (int, error) {
 
 	// write the final, outer icmp packet
 	var packet = ICMPPacket{
-		Type: ICMPTypeDestinationUnreachable,
+		Type: ICMPTypeTimeExceeded,
 		Code: byte(0x01),
 		Identifier: 0x4a4a,
 		Sequence: uint16(0),

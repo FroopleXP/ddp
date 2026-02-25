@@ -13,7 +13,8 @@ import (
 )
 
 var (
-	DuckIP = ParseIP("4.21.3.11")
+	DuckIPStr = "4.21.3.11"
+	DuckIP = ParseIP(DuckIPStr)
 	DuckMagicIdentifier = uint16(0xC4AC)
 )
 
@@ -38,6 +39,7 @@ type DDP struct {
 }
 
 func (d *DDP) Start(ctx context.Context) error {
+	log.Printf("ddp is starting duck-ip=%s, target=%s, interface=%s", DuckIP, d.Target, d.Interface)
 	if err := d.pinger(ctx); err != nil {
 		return err
 	}
@@ -213,12 +215,9 @@ func (d *DDP) quacker(ctx context.Context) error {
 
 	// write the inner icmp magic packet
 	{
-		n, err := MagicPacket.Write(payload)
-		if err != nil {
+		if _, err := MagicPacket.Write(payload); err != nil {
 			return err
 		}
-		
-		log.Printf("written %d byte(s) to icmp-ip-icmp packet", n)
 	}
 	
 	// build the inner ip packet
@@ -241,13 +240,9 @@ func (d *DDP) quacker(ctx context.Context) error {
 		}
 
 		payload.Reset()
-
-		n, err := packet.Write(payload)
-		if err != nil {
+		if _, err := packet.Write(payload); err != nil {
 			return err
 		}
-
-		log.Printf("written %d byte(s) to icmp-ip packet", n)
 	}
 
 	// write the outer icmp packet
@@ -261,16 +256,10 @@ func (d *DDP) quacker(ctx context.Context) error {
 		}
 
 		payload.Reset()
-
-		n, err := packet.Write(payload)
-		if err != nil {
+		if _, err := packet.Write(payload); err != nil {
 			return err
 		}
-
-		log.Printf("written %d byte(s) to icmp packet", n)
 	}
-
-	log.Printf("final payload size=%d byte(s)", payload.Len())
 
 	d.wg.Add(1)
 	go func() {

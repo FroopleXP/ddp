@@ -40,7 +40,7 @@ func main() {
 
 	DuckIP = ParseIP(*fDuckIP)
 
-	var ddp DDP
+	var ddp = DDP{ Target: target, Interface: intface }
 
 	log.Print("starting listener")
 	if err := ddp.StartListener(ctx, intface); err != nil {
